@@ -13,6 +13,9 @@ pub enum Variant {
     /// Integer value
     Int64(i64),
 
+    /// Array of Strings
+    StringArray(Vec<String>),
+
     /// Map
     Map(HashMap<String, Variant>),
 
@@ -35,6 +38,7 @@ impl Variant {
                 Self::Boolean(frida_sys::g_variant_get_boolean(variant) != frida_sys::FALSE as _)
             }
             "x" => Self::Int64(frida_sys::g_variant_get_int64(variant)),
+            "as" => Self::StringArray(as_to_vec(variant)),
             "a{sv}" => Self::Map(sv_array_to_map(variant)),
             "aa{sv}" => Self::MapList(asv_array_to_maplist(variant)),
             other => todo!("Unimplemented variant: {other}"),
@@ -82,6 +86,7 @@ impl std::fmt::Debug for Variant {
             Self::String(s) => s.fmt(f),
             Self::Int64(num) => num.fmt(f),
             Self::Boolean(b) => b.fmt(f),
+            Self::StringArray(a) => a.fmt(f),
             Self::Map(m) => m.fmt(f),
             Self::MapList(l) => l.fmt(f),
         }
@@ -92,6 +97,21 @@ unsafe fn variant_string(variant: *mut frida_sys::GVariant) -> String {
     CStr::from_ptr(frida_sys::g_variant_get_type_string(variant))
         .to_string_lossy()
         .to_string()
+}
+
+unsafe fn as_to_vec(variant: *mut frida_sys::GVariant) -> Vec<String> {
+    let mut ret = Vec::new();
+
+    let mut iter: frida_sys::GVariantIter = std::mem::MaybeUninit::zeroed().assume_init();
+    let mut value: *const i8 = std::ptr::null_mut();
+
+    frida_sys::g_variant_iter_init(&mut iter, variant);
+    let inner_type = CString::new("s").unwrap();
+    while frida_sys::g_variant_iter_loop(&mut iter, inner_type.as_ptr(), &mut value) != 0 {
+        let value = CStr::from_ptr(value).to_string_lossy().to_string();
+        ret.push(value);
+    }
+    ret
 }
 
 unsafe fn sv_array_to_map(variant: *mut frida_sys::GVariant) -> HashMap<String, Variant> {
