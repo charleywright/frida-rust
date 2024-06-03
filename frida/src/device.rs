@@ -4,9 +4,9 @@
  * Licence: wxWindows Library Licence, Version 3.1
  */
 
-use frida_sys::_FridaDevice;
+use frida_sys::{_FridaDevice, _FridaProcessQueryOptions};
 use std::collections::HashMap;
-use std::ffi::{CStr, CString};
+use std::ffi::{c_void, CStr, CString};
 use std::marker::PhantomData;
 
 use crate::process::Process;
@@ -118,8 +118,8 @@ impl<'a> Device<'a> {
         unsafe { frida_sys::frida_device_is_lost(self.device_ptr) == 1 }
     }
 
-    /// Returns all processes.
-    pub fn enumerate_processes<'b>(&'a self) -> Vec<Process<'b>>
+    /// Returns a list of processes using the supplied options
+    pub fn enumerate_processes<'b>(&'a self, options: &ProcessQueryOptions) -> Vec<Process<'b>>
     where
         'a: 'b,
     {
@@ -129,7 +129,7 @@ impl<'a> Device<'a> {
         let processes_ptr = unsafe {
             frida_sys::frida_device_enumerate_processes_sync(
                 self.device_ptr,
-                std::ptr::null_mut(),
+                options.ptr,
                 std::ptr::null_mut(),
                 &mut error,
             )
@@ -313,6 +313,138 @@ impl From<DeviceType> for frida_sys::FridaDeviceType {
 
 impl std::fmt::Display for DeviceType {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "{:?}", self)
+    }
+}
+
+/// Represents options to use when enumerating processes
+pub struct ProcessQueryOptions {
+    pub(crate) ptr: *mut _FridaProcessQueryOptions,
+}
+
+impl ProcessQueryOptions {
+    /// Create a new set of options
+    pub fn new() -> Self {
+        let ptr = unsafe { frida_sys::frida_process_query_options_new() };
+        Self { ptr }
+    }
+
+    /// Set the verbosity of the data returned for each process
+    pub fn set_scope(self, scope: ProcessQueryScope) -> Self {
+        unsafe { frida_sys::frida_process_query_options_set_scope(self.ptr, scope.into()) };
+        self
+    }
+
+    /// Get the verbosity of the data returned for each process
+    pub fn get_scope(&self) -> ProcessQueryScope {
+        let scope = unsafe { frida_sys::frida_process_query_options_get_scope(self.ptr) };
+        ProcessQueryScope::from(scope)
+    }
+
+    /// Add `pid` to the list of selected PIDs. If one or more processes are selected, only data
+    /// for those processes will be returned.
+    ///
+    /// This can be useful if enumerating once with [`ProcessQueryScope::Minimal`] to find a
+    /// process then again with [`ProcessQueryScope::Full`] to get the metadata for that process
+    pub fn select_pid(self, pid: u32) -> Self {
+        unsafe { frida_sys::frida_process_query_options_select_pid(self.ptr, pid) };
+        self
+    }
+
+    /// Check if any PIDs have been selected
+    pub fn has_selected_pids(&self) -> bool {
+        let has_selected_pids =
+            unsafe { frida_sys::frida_process_query_options_has_selected_pids(self.ptr) };
+        has_selected_pids != frida_sys::FALSE as _
+    }
+
+    /// Get all of the selected PIDs
+    pub fn get_selected_pids(&self) -> Vec<u32> {
+        let mut pids = Vec::new();
+        unsafe {
+            let callback = Some(std::mem::transmute(
+                process_query_options_pid_callback as usize,
+            ));
+            let user_data = &mut pids as *mut _ as *mut c_void;
+            frida_sys::frida_process_query_options_enumerate_selected_pids(
+                self.ptr, callback, user_data,
+            );
+        }
+        pids
+    }
+}
+
+impl Default for ProcessQueryOptions {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Drop for ProcessQueryOptions {
+    fn drop(&mut self) {
+        unsafe {
+            frida_sys::g_clear_object(&mut self.ptr as *mut *mut _FridaProcessQueryOptions as _)
+        }
+    }
+}
+
+unsafe extern "C" fn process_query_options_pid_callback(pid: u32, user_data: *mut c_void) {
+    let pids = &mut *(user_data as *mut Vec<u32>);
+    pids.push(pid);
+}
+
+#[repr(u32)]
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, Hash, Eq, PartialEq)]
+/// Scope of per-process data to return when enumerating processes
+// As with DeviceType we cast all values due to c_uint being i32 on Windows
+pub enum ProcessQueryScope {
+    /// PIDs with names
+    Minimal = frida_sys::FridaScope_FRIDA_SCOPE_MINIMAL as _,
+
+    /// PIDs, names and additional metadata
+    Metadata = frida_sys::FridaScope_FRIDA_SCOPE_METADATA as _,
+
+    /// PIDs, names, additional metadata and icons
+    Full = frida_sys::FridaScope_FRIDA_SCOPE_FULL as _,
+}
+
+#[cfg(not(target_family = "windows"))]
+impl From<u32> for ProcessQueryScope {
+    fn from(value: u32) -> Self {
+        match value {
+            frida_sys::FridaScope_FRIDA_SCOPE_MINIMAL => Self::Minimal,
+            frida_sys::FridaScope_FRIDA_SCOPE_METADATA => Self::Metadata,
+            frida_sys::FridaScope_FRIDA_SCOPE_FULL => Self::Full,
+            value => unreachable!("Invalid process query scope {value}"),
+        }
+    }
+}
+
+#[cfg(target_family = "windows")]
+impl From<i32> for ProcessQueryScope {
+    fn from(value: i32) -> Self {
+        match value {
+            frida_sys::FridaScope_FRIDA_SCOPE_MINIMAL => Self::Minimal,
+            frida_sys::FridaScope_FRIDA_SCOPE_METADATA => Self::Metadata,
+            frida_sys::FridaScope_FRIDA_SCOPE_FULL => Self::Full,
+            value => unreachable!("Invalid process query scope {value}"),
+        }
+    }
+}
+
+impl From<ProcessQueryScope> for frida_sys::FridaScope {
+    fn from(value: ProcessQueryScope) -> Self {
+        match value {
+            ProcessQueryScope::Minimal => frida_sys::FridaScope_FRIDA_SCOPE_MINIMAL,
+            ProcessQueryScope::Metadata => frida_sys::FridaScope_FRIDA_SCOPE_METADATA,
+            ProcessQueryScope::Full => frida_sys::FridaScope_FRIDA_SCOPE_FULL,
+        }
+    }
+}
+
+impl std::fmt::Display for ProcessQueryScope {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{:?}", self)
     }
 }
