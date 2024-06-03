@@ -5,8 +5,14 @@
  */
 
 use frida_sys::{FridaSpawnOptions, _FridaProcess};
+use std::collections::HashMap;
 use std::ffi::{CStr, CString};
 use std::marker::PhantomData;
+
+// Needed for the get_parameters docstring. See rust-lang/rust #79542
+#[allow(unused_imports)]
+use crate::device::ProcessQueryScope;
+use crate::variant::Variant;
 
 /// Process management in Frida.
 pub struct Process<'a> {
@@ -33,6 +39,30 @@ impl<'a> Process<'a> {
     /// Returns the process ID of the process.
     pub fn get_pid(&self) -> u32 {
         unsafe { frida_sys::frida_process_get_pid(self.process_ptr) }
+    }
+
+    /// Returns the extra metadata of the process
+    ///
+    /// NOTE: This may be missing data if [`ProcessQueryScope::Minimal`] was used
+    pub fn get_parameters(&self) -> HashMap<String, Variant> {
+        let ht = unsafe { frida_sys::frida_process_get_parameters(self.process_ptr) };
+        let mut iter: frida_sys::GHashTableIter =
+            unsafe { std::mem::MaybeUninit::zeroed().assume_init() };
+        unsafe { frida_sys::g_hash_table_iter_init(&mut iter, ht) };
+        let size = unsafe { frida_sys::g_hash_table_size(ht) };
+        let mut map = HashMap::with_capacity(size as usize);
+
+        let mut key = std::ptr::null_mut();
+        let mut val = std::ptr::null_mut();
+        while (unsafe { frida_sys::g_hash_table_iter_next(&mut iter, &mut key, &mut val) }
+            != frida_sys::FALSE as _)
+        {
+            let key = unsafe { CStr::from_ptr(key as _) };
+            let val = unsafe { Variant::from_ptr(val as _) };
+            map.insert(key.to_string_lossy().to_string(), val);
+        }
+
+        map
     }
 }
 
